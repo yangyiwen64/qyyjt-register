@@ -1,6 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { Account, RegisterProgress, ProgressLog } from '@/types';
 
+// Render 后端地址（硬编码，前后端分离部署）
+const BACKEND_URL = 'https://qyyjt-register.onrender.com';
+
 const STORAGE_KEY = 'qyyjt_accounts_v2';
 const ONE_YEAR = 365 * 24 * 60 * 60 * 1000;
 
@@ -30,38 +33,51 @@ export function useAccounts() {
   const cancelRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // WebSocket 连接后端（同域）
+  // WebSocket 连接 Render 后端
   useEffect(() => {
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const wsUrl = BACKEND_URL.replace(/^http/, 'ws');
     let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      ws.onopen = () => {
-        setBackendConnected(true);
-        setProgress(p => ({ ...p, logs: [mkLog('success', '后端连接成功'), ...p.logs].slice(0, 200) }));
-      };
-      ws.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'progress') {
-            const d = msg.data;
-            const newLog = d.log ? { time: d.log.time || nowTime(), message: d.log.message, type: (d.log.type || 'info') as ProgressLog['type'] } : null;
-            setProgress(p => ({ ...p, total: d.total ?? p.total, completed: d.current ?? p.completed, currentStep: d.step ?? p.currentStep, stepDetail: d.detail ?? p.stepDetail, isRunning: true, logs: newLog ? [newLog, ...p.logs].slice(0, 200) : p.logs }));
-          } else if (msg.type === 'account') {
-            const a = msg.data;
-            setAccounts(p => { const u = [{ id: a.id || genId(), phone: a.phone, password: a.password, status: (a.status || 'success') as Account['status'], createTime: a.createTime || new Date().toLocaleString('zh-CN'), remark: a.remark || '真实注册' }, ...p]; save(u); return u; });
-          } else if (msg.type === 'complete') {
-            setProgress(p => ({ ...p, isRunning: false, currentStep: '注册完成', stepDetail: `成功注册 ${msg.data.successCount}/${msg.data.total} 个`, logs: [mkLog('success', `批量注册完成，成功 ${msg.data.successCount}/${msg.data.total} 个`), ...p.logs].slice(0, 200) }));
-          } else if (msg.type === 'error') {
-            setProgress(p => ({ ...p, isRunning: false, currentStep: '注册出错', stepDetail: msg.data.message, logs: [mkLog('error', `错误: ${msg.data.message}`), ...p.logs].slice(0, 200) }));
-          }
-        } catch {}
-      };
-      ws.onclose = () => { wsRef.current = null; setBackendConnected(false); };
-      ws.onerror = () => { wsRef.current = null; setBackendConnected(false); };
-    } catch { setBackendConnected(false); }
-    return () => { ws?.close(); };
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      try {
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+        ws.onopen = () => {
+          setBackendConnected(true);
+          setProgress(p => ({ ...p, logs: [mkLog('success', '后端连接成功'), ...p.logs].slice(0, 200) }));
+        };
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'progress') {
+              const d = msg.data;
+              const newLog = d.log ? { time: d.log.time || nowTime(), message: d.log.message, type: (d.log.type || 'info') as ProgressLog['type'] } : null;
+              setProgress(p => ({ ...p, total: d.total ?? p.total, completed: d.current ?? p.completed, currentStep: d.step ?? p.currentStep, stepDetail: d.detail ?? p.stepDetail, isRunning: true, logs: newLog ? [newLog, ...p.logs].slice(0, 200) : p.logs }));
+            } else if (msg.type === 'account') {
+              const a = msg.data;
+              setAccounts(p => { const u = [{ id: a.id || genId(), phone: a.phone, password: a.password, status: (a.status || 'success') as Account['status'], createTime: a.createTime || new Date().toLocaleString('zh-CN'), remark: a.remark || '真实注册' }, ...p]; save(u); return u; });
+            } else if (msg.type === 'complete') {
+              setProgress(p => ({ ...p, isRunning: false, currentStep: '注册完成', stepDetail: `成功注册 ${msg.data.successCount}/${msg.data.total} 个`, logs: [mkLog('success', `批量注册完成，成功 ${msg.data.successCount}/${msg.data.total} 个`), ...p.logs].slice(0, 200) }));
+            } else if (msg.type === 'error') {
+              setProgress(p => ({ ...p, isRunning: false, currentStep: '注册出错', stepDetail: msg.data.message, logs: [mkLog('error', `错误: ${msg.data.message}`), ...p.logs].slice(0, 200) }));
+            }
+          } catch {}
+        };
+        ws.onclose = () => { wsRef.current = null; setBackendConnected(false); };
+        ws.onerror = () => { wsRef.current = null; setBackendConnected(false); };
+      } catch { setBackendConnected(false); }
+    };
+
+    connect();
+    // 每10秒检查重连
+    reconnectTimer = setInterval(() => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        connect();
+      }
+    }, 10000);
+
+    return () => { if (reconnectTimer) clearInterval(reconnectTimer); ws?.close(); };
   }, []);
 
   // 批量注册 - 直接调用后端真实引擎
@@ -70,7 +86,7 @@ export function useAccounts() {
     setProgress({ total: count, completed: 0, currentStep: '准备注册', stepDetail: `共 ${count} 个账号待注册`, isRunning: true, logs: [mkLog('info', `启动真实注册，目标: ${count} 个`)] });
 
     try {
-      const res = await fetch('/api/register', {
+      const res = await fetch(`${BACKEND_URL}/api/register`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ count }), signal: AbortSignal.timeout(300000) // 5分钟超时
       });
@@ -85,7 +101,7 @@ export function useAccounts() {
 
   const cancelRegister = useCallback(async () => {
     cancelRef.current = true;
-    try { await fetch('/api/register/cancel', { method: 'POST', signal: AbortSignal.timeout(5000) }); } catch {}
+    try { await fetch(`${BACKEND_URL}/api/register/cancel`, { method: 'POST', signal: AbortSignal.timeout(5000) }); } catch {}
   }, []);
 
   const addBatchAccounts = useCallback((items: Array<{ phone: string; password: string; status?: Account['status']; remark?: string }>) => {
