@@ -3,7 +3,7 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { startBrowserRegistration, cancelRegistration, resetCancel } from './register_browser.mjs';
+import { spawn } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -32,32 +32,158 @@ function broadcast(data) {
 
 wss.on('connection', (ws) => { clients.add(ws); ws.on('close', () => clients.delete(ws)); });
 
-app.post('/api/register', (req, res) => {
-  const count = req.body.count || 1;
+// 调用 Python 注册引擎
+function callPython(args, onData) {
+  return new Promise((resolve, reject) => {
+    const pythonPath = process.env.PYTHON_PATH || 'python3';
+    const scriptPath = path.join(__dirname, 'api_wrapper.py');
+    const proc = spawn(pythonPath, [scriptPath, ...args], {
+      cwd: __dirname,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' }
+    });
+
+    let output = '';
+    let errorOutput = '';
+
+    proc.stdout.on('data', (data) => {
+      const text = data.toString();
+      output += text;
+      // 尝试解析实时进度
+      try {
+        const lines = text.split('\n').filter(l => l.trim());
+        for (const line of lines) {
+          if (line.startsWith('{') && line.endsWith('}')) {
+            const parsed = JSON.parse(line);
+            if (onData) onData(parsed);
+          }
+        }
+      } catch {}
+    });
+
+    proc.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+      console.error(`[Python] ${data.toString().trim()}`);
+    });
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`Python进程退出码 ${code}: ${errorOutput}`));
+        return;
+      }
+      try {
+        // 提取最后一行 JSON
+        const lines = output.split('\n').filter(l => l.trim());
+        const lastJson = lines.reverse().find(l => l.startsWith('{') && l.endsWith('}'));
+        if (lastJson) {
+          resolve(JSON.parse(lastJson));
+        } else {
+          resolve({ success: false, error: '无有效输出', raw: output });
+        }
+      } catch (e) {
+        resolve({ success: false, error: `解析失败: ${e.message}`, raw: output });
+      }
+    });
+
+    proc.on('error', (err) => reject(err));
+  });
+}
+
+// API路由
+app.post('/api/register', async (req, res) => {
+  const count = Math.min(req.body.count || 1, 20);
   if (isRegistering) return res.status(409).json({ success: false, message: '已有任务进行中' });
-  if (count < 1 || count > 20) return res.status(400).json({ success: false, message: '数量1-20' });
-  isRegistering = true; resetCancel();
+
+  isRegistering = true;
   res.json({ success: true, message: `开始注册 ${count} 个`, count });
-  startBrowserRegistration(count,
-    (data) => {
-      broadcast({ type: 'progress', data: { current: data.current, total: data.total, step: data.step, detail: data.detail, log: data.log } });
-      if (data.account) { const acc = { id: generateId(), phone: data.account.phone, password: data.account.password, status: data.account.status, createTime: now(), remark: data.account.remark }; registeredAccounts.unshift(acc); broadcast({ type: 'account', data: acc }); }
-    },
-    (successCount, accounts) => { isRegistering = false; broadcast({ type: 'complete', data: { successCount, total: count, accounts } }); }
-  ).catch(err => { isRegistering = false; broadcast({ type: 'error', data: { message: err.message } }); });
+
+  try {
+    broadcast({ type: 'progress', data: { current: 0, total: count, step: '准备注册', detail: `共 ${count} 个账号`, log: { time: now(), message: '启动真实浏览器注册...', type: 'info' } } });
+
+    if (count === 1) {
+      // 单个注册
+      broadcast({ type: 'progress', data: { current: 0, total: 1, step: '登录豪猪网', detail: '正在登录豪猪网...', log: { time: now(), message: '正在登录豪猪网...', type: 'info' } } });
+
+      const result = await callPython(['--single']);
+
+      if (result.success) {
+        const acc = { id: generateId(), phone: result.phone, password: result.password, status: 'success', createTime: now(), remark: result.remark || '真实注册' };
+        registeredAccounts.unshift(acc);
+        broadcast({ type: 'account', data: acc });
+        broadcast({ type: 'progress', data: { current: 1, total: 1, step: '注册成功', detail: `账号注册成功: ${result.phone}`, log: { time: now(), message: `注册成功: ${result.phone}`, type: 'success' } } });
+        broadcast({ type: 'complete', data: { successCount: 1, total: 1, accounts: [acc] } });
+      } else {
+        broadcast({ type: 'progress', data: { current: 0, total: 1, step: '注册失败', detail: result.error || '未知错误', log: { time: now(), message: `失败: ${result.error}`, type: 'error' } } });
+        broadcast({ type: 'complete', data: { successCount: 0, total: 1, accounts: [] } });
+      }
+    } else {
+      // 批量注册
+      broadcast({ type: 'progress', data: { current: 0, total: count, step: '登录豪猪网', detail: '批量注册开始', log: { time: now(), message: `开始批量注册 ${count} 个`, type: 'info' } } });
+
+      const results = await callPython(['--batch', String(count)]);
+      const accounts = Array.isArray(results) ? results : [results];
+      let successCount = 0;
+
+      for (const result of accounts) {
+        if (result.success) {
+          successCount++;
+          const acc = { id: generateId(), phone: result.phone, password: result.password, status: 'success', createTime: now(), remark: result.remark || '批量注册' };
+          registeredAccounts.unshift(acc);
+          broadcast({ type: 'account', data: acc });
+        }
+      }
+
+      broadcast({ type: 'complete', data: { successCount, total: count, accounts } });
+    }
+  } catch (err) {
+    console.error('[注册错误]', err);
+    const errorMsg = err.message || String(err);
+    broadcast({ type: 'progress', data: { current: 0, total: count, step: '注册失败', detail: errorMsg, log: { time: now(), message: `错误: ${errorMsg}`, type: 'error' } } });
+    broadcast({ type: 'complete', data: { successCount: 0, total: count, accounts: [] } });
+  } finally {
+    isRegistering = false;
+  }
 });
 
-app.post('/api/register/cancel', (_req, res) => { cancelRegistration(); isRegistering = false; res.json({ success: true }); });
-app.get('/api/accounts', (_req, res) => res.json({ success: true, data: registeredAccounts }));
-app.get('/api/status', (_req, res) => res.json({ success: true, data: { isRegistering, totalAccounts: registeredAccounts.length } }));
+app.post('/api/register/cancel', (_req, res) => {
+  res.json({ success: true, message: '取消信号已发送（正在运行的注册无法中断）' });
+});
 
+app.get('/api/accounts', (_req, res) => res.json({ success: true, data: registeredAccounts }));
+app.get('/api/status', (_req, res) => res.json({ success: true, data: { isRegistering, totalAccounts: registeredAccounts.length, playwright: null } }));
+
+// 测试 Python 环境
+app.get('/api/test-env', async (_req, res) => {
+  try {
+    const result = await callPython([]);
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 静态文件
 const distPath = path.join(__dirname, '../dist');
 app.use(express.static(distPath));
 app.use((_req, res) => res.sendFile(path.join(distPath, 'index.html')));
 
+// 启动时检查环境
+async function checkEnvironment() {
+  console.log('[检查] 检测 Python 环境...');
+  try {
+    const result = await callPython([]);
+    console.log(`[检查] Python: ✅, Playwright: ${result.playwright ? '✅' : '❌'}`);
+    return result;
+  } catch (err) {
+    console.error(`[检查] Python: ❌ - ${err.message}`);
+    return { python: false, error: err.message };
+  }
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`[服务器] 端口 ${PORT}`);
   console.log(`[豪猪网] 账号: todayis0607, 项目: 49827`);
-  console.log(`[模式] Playwright浏览器自动化`);
+  console.log(`[预警通] 地址: https://www.qyyjt.cn/user/login`);
+  console.log(`[引擎] Python + Playwright 浏览器自动化`);
+  await checkEnvironment();
 });

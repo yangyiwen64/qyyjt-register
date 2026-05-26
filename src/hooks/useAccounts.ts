@@ -32,9 +32,24 @@ function save(list: Account[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: '2', timestamp: Date.now(), accounts: list }));
 }
 
-// 获取后端地址（用户可配置）
+// 获取后端地址（自动检测环境）
 function getBackendUrl(): string {
-  return localStorage.getItem(BACKEND_URL_KEY) || '';
+  // 1. 用户手动配置的优先
+  const manual = localStorage.getItem(BACKEND_URL_KEY);
+  if (manual) return manual;
+
+  // 2. 本地开发环境
+  if (window.location.hostname === 'localhost') {
+    return 'http://localhost:3000';
+  }
+
+  // 3. Render 部署环境（同域）
+  if (window.location.hostname.includes('onrender.com')) {
+    return ''; // 同域，相对路径
+  }
+
+  // 4. 其他公网部署（如 ok.kimi.link）- 需要配置后端地址
+  return ''; // 空字符串表示使用相对路径（同域）
 }
 function setBackendUrl(url: string) {
   if (url) localStorage.setItem(BACKEND_URL_KEY, url);
@@ -51,8 +66,7 @@ export function useAccounts() {
 
   // 测试后端连接
   const testBackend = useCallback(async (url?: string): Promise<boolean> => {
-    const testUrl = url || backendUrl;
-    if (!testUrl) return false;
+    const testUrl = (url || backendUrl || '').replace(/\/$/, '');
     try {
       const res = await fetch(`${testUrl}/api/status`, { method: 'GET', signal: AbortSignal.timeout(5000) });
       if (res.ok) {
@@ -66,9 +80,10 @@ export function useAccounts() {
 
   // WebSocket 连接后端
   useEffect(() => {
-    if (!backendUrl) { setBackendConnected(false); return; }
-    const wsUrl = backendUrl.replace(/^http/, 'ws');
-    let ws: WebSocket;
+    const wsUrl = backendUrl
+      ? backendUrl.replace(/^http/, 'ws')
+      : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    let ws: WebSocket | null = null;
     try {
       ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -92,8 +107,8 @@ export function useAccounts() {
       };
       ws.onclose = () => { wsRef.current = null; setBackendConnected(false); };
       ws.onerror = () => { wsRef.current = null; setBackendConnected(false); };
-      return () => ws.close();
     } catch { setBackendConnected(false); }
+    return () => { ws?.close(); };
   }, [backendUrl]);
 
   // 配置后端地址
@@ -110,9 +125,10 @@ export function useAccounts() {
     setProgress({ total: count, completed: 0, currentStep: '准备注册', stepDetail: `共 ${count} 个账号待注册`, isRunning: true, logs: [mkLog('info', `启动注册，目标: ${count} 个`)] });
 
     // 如果有配置后端地址，尝试调用
-    if (backendUrl) {
+    const apiBase = backendUrl || ''; // 空字符串表示同域
+    if (apiBase || window.location.hostname === 'localhost') {
       try {
-        const res = await fetch(`${backendUrl}/api/register`, {
+        const res = await fetch(`${apiBase}/api/register`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ count }), signal: AbortSignal.timeout(10000)
         });
@@ -160,8 +176,9 @@ export function useAccounts() {
 
   const cancelRegister = useCallback(async () => {
     cancelRef.current = true;
-    if (backendUrl) {
-      try { await fetch(`${backendUrl}/api/register/cancel`, { method: 'POST', signal: AbortSignal.timeout(5000) }); } catch {}
+    const apiBase = backendUrl || '';
+    if (apiBase || window.location.hostname === 'localhost') {
+      try { await fetch(`${apiBase}/api/register/cancel`, { method: 'POST', signal: AbortSignal.timeout(5000) }); } catch {}
     }
   }, [backendUrl]);
 
