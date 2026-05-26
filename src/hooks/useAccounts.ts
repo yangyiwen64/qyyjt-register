@@ -80,22 +80,48 @@ export function useAccounts() {
     return () => { if (reconnectTimer) clearInterval(reconnectTimer); ws?.close(); };
   }, []);
 
+  // 预热衷醒 Render 后端（免费计划会休眠）
+  const wakeBackend = useCallback(async (): Promise<boolean> => {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      const res = await fetch(`${BACKEND_URL}/api/status`, { signal: ctrl.signal });
+      clearTimeout(timer);
+      return res.ok;
+    } catch { return false; }
+  }, []);
+
   // 批量注册 - 直接调用后端真实引擎
   const startRegister = useCallback(async (count: number) => {
     cancelRef.current = false;
     setProgress({ total: count, completed: 0, currentStep: '准备注册', stepDetail: `共 ${count} 个账号待注册`, isRunning: true, logs: [mkLog('info', `启动真实注册，目标: ${count} 个`)] });
 
+    // Step 1: 预热衷醒后端
+    setProgress(p => ({ ...p, currentStep: '连接后端', stepDetail: '正在唤醒 Render 后端服务...', logs: [mkLog('info', '正在连接 Render 后端（首次可能需要 30 秒冷启动）...'), ...p.logs].slice(0, 200) }));
+    const awake = await wakeBackend();
+    if (!awake) {
+      setProgress(p => ({ ...p, isRunning: false, currentStep: '连接失败', stepDetail: '无法连接 Render 后端', logs: [mkLog('error', '连接 Render 后端失败，请检查：'), mkLog('error', '1. 后端是否已部署到 Render'), mkLog('error', '2. 访问 https://qyyjt-register.onrender.com 查看状态'), ...p.logs].slice(0, 200) }));
+      return;
+    }
+    setProgress(p => ({ ...p, logs: [mkLog('success', 'Render 后端已连接'), ...p.logs].slice(0, 200) }));
+
+    // Step 2: 调用注册 API
     try {
+      setProgress(p => ({ ...p, currentStep: '启动注册', stepDetail: '正在发送注册指令...', logs: [mkLog('info', '正在调用真实注册引擎...'), ...p.logs].slice(0, 200) }));
       const res = await fetch(`${BACKEND_URL}/api/register`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count }), signal: AbortSignal.timeout(300000) // 5分钟超时
+        body: JSON.stringify({ count })
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: '后端响应错误' }));
         setProgress(p => ({ ...p, isRunning: false, currentStep: '注册失败', stepDetail: err.message || '后端请求失败', logs: [mkLog('error', `后端错误: ${err.message || '未知错误'}`), ...p.logs].slice(0, 200) }));
+      } else {
+        setProgress(p => ({ ...p, logs: [mkLog('success', '注册指令已发送，等待后端处理...'), ...p.logs].slice(0, 200) }));
       }
     } catch (err: any) {
-      setProgress(p => ({ ...p, isRunning: false, currentStep: '注册失败', stepDetail: err.message, logs: [mkLog('error', `连接失败: ${err.message}`), ...p.logs].slice(0, 200) }));
+      const isAbort = err.name === 'AbortError';
+      const msg = isAbort ? '请求超时（Render 冷启动可能需要 30-60 秒，请重试）' : `${err.message}`;
+      setProgress(p => ({ ...p, isRunning: false, currentStep: '注册失败', stepDetail: msg, logs: [mkLog('error', `请求失败: ${msg}`), mkLog('info', '提示: Render 免费计划会休眠，首次请求需要唤醒'), ...p.logs].slice(0, 200) }));
     }
   }, []);
 
