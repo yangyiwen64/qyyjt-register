@@ -3,6 +3,5 @@ node_modules/
 .DS_Store
 server/*.ts
 !server/*.mjs
-register_engine.py
 login_haozhu*.py
 tmp/

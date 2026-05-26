@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "postinstall": "pip install opencv-python numpy pillow requests playwright 2>/dev/null || true && python -m playwright install chromium 2>/dev/null || true",
     "dev": "concurrently \"tsc -p tsconfig.server.json --watch\" \"vite\" \"node --watch server/index.js\"",
     "build": "tsc -b && vite build && tsc -p tsconfig.server.json",
     "build:server": "tsc -p tsconfig.server.json",
