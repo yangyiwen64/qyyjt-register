@@ -6,7 +6,7 @@ import Dashboard from '@/sections/Dashboard';
 
 function App() {
   const { currentUser, isAuthenticated, users, login, logout, switchUser, addUser, deleteUser, updateUserPassword } = useAuth();
-  const { accounts, stats, progress, backendUrl, backendConnected, startRegister, cancelRegister, addBatchAccounts, deleteAccount, clearAll, resetProgress, configureBackend, testBackend } = useAccounts();
+  const { accounts, stats, progress, backendConnected, startRegister, cancelRegister, addBatchAccounts, deleteAccount, clearAll, resetProgress } = useAccounts();
 
   const [isParallel, setIsParallel] = useState(true);
 
@@ -26,7 +26,6 @@ function App() {
       isParallel={isParallel}
       currentUser={currentUser}
       users={users}
-      backendUrl={backendUrl}
       backendConnected={backendConnected}
       onLogout={logout}
       onSwitchUser={switchUser}
@@ -39,8 +38,6 @@ function App() {
       onDeleteUser={deleteUser}
       onUpdateUserPassword={updateUserPassword}
       onImportAccounts={addBatchAccounts}
-      onConfigureBackend={configureBackend}
-      onTestBackend={testBackend}
     />
   );
 }
