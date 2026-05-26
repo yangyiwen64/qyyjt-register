@@ -3,7 +3,7 @@ services:
     name: qyyjt-register
     runtime: node
     plan: free
-    buildCommand: npm install && pip install -r requirements.txt && python -m playwright install chromium
+    buildCommand: npm install && npm run build && pip install -r requirements.txt && python -m playwright install chromium
     startCommand: node server/index.mjs
     envVars:
       - key: NODE_ENV

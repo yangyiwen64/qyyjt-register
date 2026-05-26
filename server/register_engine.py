@@ -188,16 +188,16 @@ async def trigger_sms(page, phone):
 
 
 async def complete_registration(page, phone, sms_code, password=DEFAULT_PASSWORD):
-    log("预警通: 打开登录页")
-    await page.goto(QYYJT_URL, wait_until="domcontentloaded", timeout=15000)
-    await asyncio.sleep(2)
+    # 复用trigger_sms后的同一页面，不重新导航（避免session丢失导致验证码失效）
+    log("预警通: 在当前页面输入验证码")
 
-    log("预警通: 输入信息")
-    await page.click("text=验证码登录/注册")
-    await asyncio.sleep(0.5)
-    await page.fill('input[placeholder*="手机号"]', phone)
-    await asyncio.sleep(0.3)
+    # 清除并重新输入手机号（确保正确）
+    phone_input = await page.query_selector('input[placeholder*="手机号"]')
+    if phone_input:
+        await phone_input.fill(phone)
+        await asyncio.sleep(0.3)
 
+    # 确保协议已勾选
     checkbox = await page.query_selector('input[type="checkbox"]')
     if checkbox and not await checkbox.is_checked():
         await checkbox.click()
@@ -248,44 +248,34 @@ async def complete_registration(page, phone, sms_code, password=DEFAULT_PASSWORD
 
     # 1. 检查localStorage中是否有token（最可靠的方式）
     has_token = await page.evaluate("""() => {
-        const tk = localStorage.getItem('a_tk') || localStorage.getItem('token') || localStorage.getItem('accessToken');
-        return !!tk;
-    """)
+const tk = localStorage.getItem('a_tk') || localStorage.getItem('token') || localStorage.getItem('accessToken');
+return !!tk;
+}""")
     log(f"预警通: localStorage有token={has_token}")
 
     # 2. 检查是否存在用户相关元素（退出按钮、用户名、头像等）
     user_elements = await page.evaluate("""() => {
-        const indicators = [
-            'button:has-text("退出")',
-            '[class*="logout"]',
-            '[class*="user-name"]',
-            '[class*="avatar"]',
-            '[class*="user-info"]',
-            '.ant-dropdown-trigger',
-            '[class*="header-right"]',
-        ];
-        for (const sel of indicators) {
-            if (document.querySelector(sel)) return sel;
-        }
-        return null;
-    }""")
+const indicators = ['[class*="logout"]','[class*="user-name"]','[class*="avatar"]','[class*="user-info"]','.ant-dropdown-trigger','[class*="header-right"]'];
+for (const sel of indicators) { if (document.querySelector(sel)) return sel; }
+return null;
+}""")
     log(f"预警通: 用户元素={user_elements}")
 
     # 3. 检查是否有错误消息弹窗
     error_msg = await page.evaluate("""() => {
-        const el = document.querySelector('.ant-message-error, .ant-notification-notice-message, [class*="error"]');
-        return el ? el.textContent : null;
-    }""")
+const el = document.querySelector('.ant-message-error, .ant-notification-notice-message, [class*="error"]');
+return el ? el.textContent : null;
+}""")
     if error_msg:
         log(f"预警通: 检测到错误消息: {error_msg}")
 
     # 4. 检查是否是设置密码页面/弹窗（可能是异步加载的）
     has_set_pwd = await page.evaluate("""() => {
-        return document.body.innerText.includes('设置密码') ||
-               document.body.innerText.includes('请设置密码') ||
-               document.body.innerText.includes('设置登录密码') ||
-               document.querySelector('input[placeholder*="设置密码"], input[placeholder*="新密码"]') !== null;
-    }""")
+return document.body.innerText.includes('设置密码') ||
+document.body.innerText.includes('请设置密码') ||
+document.body.innerText.includes('设置登录密码') ||
+document.querySelector('input[placeholder*="设置密码"], input[placeholder*="新密码"]') !== null;
+}""")
     log(f"预警通: 需要设置密码={has_set_pwd}")
 
     # 判断登录状态
@@ -326,9 +316,9 @@ async def complete_registration(page, phone, sms_code, password=DEFAULT_PASSWORD
         # 再检查一下是否需要设置密码（可能是登录后弹窗）
         await asyncio.sleep(1)
         still_need_pwd = await page.evaluate("""() => {
-            return document.body.innerText.includes('设置密码') ||
-                   document.querySelector('input[type="password"]') !== null;
-        }""")
+return document.body.innerText.includes('设置密码') ||
+document.querySelector('input[type="password"]') !== null;
+}""")
         if still_need_pwd:
             log("预警通: 登录后出现密码设置弹窗")
             pwd_inputs = await page.query_selector_all('input[type="password"]')
