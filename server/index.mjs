@@ -10,40 +10,56 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-// 启动时自动安装 Python 依赖（Render Node runtime 的 build 阶段 pip 不生效）
-function ensurePythonDeps() {
-  try {
-    execSync('python3 -c "import cv2, numpy, PIL, requests, playwright"', { stdio: 'ignore' });
-    console.log('[Python] 依赖已就绪');
-    return;
-  } catch {
-    console.log('[Python] 依赖缺失，正在安装...');
-  }
+let pythonDepsReady = false;
 
-  const deps = ['opencv-python', 'numpy', 'pillow', 'requests', 'scipy', 'playwright'];
-  for (const dep of deps) {
+// 尝试安装 Python 依赖（多种方式）
+async function ensurePythonDeps() {
+  if (pythonDepsReady) return true;
+
+  console.log('[Python] 正在检查和安装依赖...');
+
+  // 方式1: 直接 pip3
+  const installers = [
+    'pip3 install opencv-python numpy pillow requests scipy playwright',
+    'python3 -m pip install --user opencv-python numpy pillow requests scipy playwright',
+    'python -m pip install opencv-python numpy pillow requests scipy playwright',
+  ];
+
+  for (const cmd of installers) {
     try {
-      execSync(`python3 -m pip install --user ${dep}`, { stdio: 'inherit', timeout: 120000 });
-      console.log(`[Python] ${dep} 安装成功`);
-    } catch (e) {
-      console.log(`[Python] ${dep} 安装失败: ${e.message}`);
+      execSync(cmd, { stdio: 'ignore', timeout: 120000 });
+      console.log(`[Python] 依赖安装成功: ${cmd.split(' ')[0]}`);
+      pythonDepsReady = true;
+      break;
+    } catch {
+      // 尝试下一个
     }
   }
 
   // 安装 Playwright 浏览器
-  try {
-    execSync('python3 -m playwright install chromium', { stdio: 'inherit', timeout: 180000 });
-    console.log('[Python] Playwright chromium 安装成功');
-  } catch (e) {
-    console.log(`[Python] Playwright chromium 安装失败: ${e.message}`);
+  if (pythonDepsReady) {
+    try {
+      execSync('python3 -m playwright install chromium', { stdio: 'ignore', timeout: 180000 });
+      console.log('[Python] Playwright chromium 安装成功');
+    } catch {
+      try {
+        execSync('python -m playwright install chromium', { stdio: 'ignore', timeout: 180000 });
+        console.log('[Python] Playwright chromium 安装成功');
+      } catch {
+        console.log('[Python] Playwright chromium 安装失败');
+      }
+    }
   }
 
   // 验证
   try {
-    execSync('python3 -c "import cv2, numpy, PIL, requests, playwright"', { stdio: 'inherit' });
+    execSync('python3 -c "import cv2, numpy, PIL, requests, playwright"', { stdio: 'ignore' });
     console.log('[Python] 依赖验证通过');
+    pythonDepsReady = true;
+    return true;
   } catch {
-    console.log('[Python] 依赖验证失败，注册功能将不可用');
+    console.log('[Python] 依赖验证失败');
+    return false;
   }
 }
 
@@ -69,8 +85,16 @@ function broadcast(data) {
 
 wss.on('connection', (ws) => { clients.add(ws); ws.on('close', () => clients.delete(ws)); });
 
-// 调用 Python 注册引擎
-function callPython(args, onData) {
+// 调用 Python 注册引擎（带依赖检查）
+async function callPython(args, onData) {
+  // 确保 Python 依赖已安装
+  if (!pythonDepsReady) {
+    const ok = await ensurePythonDeps();
+    if (!ok) {
+      throw new Error('Python 依赖安装失败，请手动在 Render Shell 执行: pip3 install opencv-python numpy pillow requests scipy playwright && python3 -m playwright install chromium');
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const pythonPath = process.env.PYTHON_PATH || 'python3';
     const scriptPath = path.join(__dirname, 'api_wrapper.py');
@@ -85,7 +109,6 @@ function callPython(args, onData) {
     proc.stdout.on('data', (data) => {
       const text = data.toString();
       output += text;
-      // 尝试解析实时进度
       try {
         const lines = text.split('\n').filter(l => l.trim());
         for (const line of lines) {
@@ -108,7 +131,6 @@ function callPython(args, onData) {
         return;
       }
       try {
-        // 提取最后一行 JSON
         const lines = output.split('\n').filter(l => l.trim());
         const lastJson = lines.reverse().find(l => l.startsWith('{') && l.endsWith('}'));
         if (lastJson) {
@@ -136,8 +158,16 @@ app.post('/api/register', async (req, res) => {
   try {
     broadcast({ type: 'progress', data: { current: 0, total: count, step: '准备注册', detail: `共 ${count} 个账号`, log: { time: now(), message: '启动真实浏览器注册...', type: 'info' } } });
 
+    // 先确保依赖
+    const depsOk = await ensurePythonDeps();
+    if (!depsOk) {
+      broadcast({ type: 'error', data: { message: 'Python 依赖安装失败，请检查 Render 日志' } });
+      broadcast({ type: 'complete', data: { successCount: 0, total: count, accounts: [] } });
+      isRegistering = false;
+      return;
+    }
+
     if (count === 1) {
-      // 单个注册
       broadcast({ type: 'progress', data: { current: 0, total: 1, step: '登录豪猪网', detail: '正在登录豪猪网...', log: { time: now(), message: '正在登录豪猪网...', type: 'info' } } });
 
       const result = await callPython(['--single']);
@@ -153,7 +183,6 @@ app.post('/api/register', async (req, res) => {
         broadcast({ type: 'complete', data: { successCount: 0, total: 1, accounts: [] } });
       }
     } else {
-      // 批量注册
       broadcast({ type: 'progress', data: { current: 0, total: count, step: '登录豪猪网', detail: '批量注册开始', log: { time: now(), message: `开始批量注册 ${count} 个`, type: 'info' } } });
 
       const results = await callPython(['--batch', String(count)]);
@@ -186,7 +215,7 @@ app.post('/api/register/cancel', (_req, res) => {
 });
 
 app.get('/api/accounts', (_req, res) => res.json({ success: true, data: registeredAccounts }));
-app.get('/api/status', (_req, res) => res.json({ success: true, data: { isRegistering, totalAccounts: registeredAccounts.length, playwright: null } }));
+app.get('/api/status', (_req, res) => res.json({ success: true, data: { isRegistering, totalAccounts: registeredAccounts.length, pythonReady: pythonDepsReady } }));
 
 // 测试 Python 环境
 app.get('/api/test-env', async (_req, res) => {
@@ -203,28 +232,10 @@ const distPath = path.join(__dirname, '../dist');
 app.use(express.static(distPath));
 app.use((_req, res) => res.sendFile(path.join(distPath, 'index.html')));
 
-// 启动时检查环境
-async function checkEnvironment() {
-  console.log('[检查] 检测 Python 环境...');
-  try {
-    const result = await callPython([]);
-    console.log(`[检查] Python: ✅, Playwright: ${result.playwright ? '✅' : '❌'}`);
-    return result;
-  } catch (err) {
-    console.error(`[检查] Python: ❌ - ${err.message}`);
-    return { python: false, error: err.message };
-  }
-}
-
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, async () => {
+server.listen(PORT, () => {
   console.log(`[服务器] 端口 ${PORT}`);
   console.log(`[豪猪网] 账号: todayis0607, 项目: 49827`);
   console.log(`[预警通] 地址: https://www.qyyjt.cn/user/login`);
   console.log(`[引擎] Python + Playwright 浏览器自动化`);
-
-  // 启动时确保 Python 依赖已安装
-  ensurePythonDeps();
-
-  await checkEnvironment();
 });
