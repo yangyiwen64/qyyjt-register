@@ -3,12 +3,49 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
+
+// 启动时自动安装 Python 依赖（Render Node runtime 的 build 阶段 pip 不生效）
+function ensurePythonDeps() {
+  try {
+    execSync('python3 -c "import cv2, numpy, PIL, requests, playwright"', { stdio: 'ignore' });
+    console.log('[Python] 依赖已就绪');
+    return;
+  } catch {
+    console.log('[Python] 依赖缺失，正在安装...');
+  }
+
+  const deps = ['opencv-python', 'numpy', 'pillow', 'requests', 'scipy', 'playwright'];
+  for (const dep of deps) {
+    try {
+      execSync(`python3 -m pip install --user ${dep}`, { stdio: 'inherit', timeout: 120000 });
+      console.log(`[Python] ${dep} 安装成功`);
+    } catch (e) {
+      console.log(`[Python] ${dep} 安装失败: ${e.message}`);
+    }
+  }
+
+  // 安装 Playwright 浏览器
+  try {
+    execSync('python3 -m playwright install chromium', { stdio: 'inherit', timeout: 180000 });
+    console.log('[Python] Playwright chromium 安装成功');
+  } catch (e) {
+    console.log(`[Python] Playwright chromium 安装失败: ${e.message}`);
+  }
+
+  // 验证
+  try {
+    execSync('python3 -c "import cv2, numpy, PIL, requests, playwright"', { stdio: 'inherit' });
+    console.log('[Python] 依赖验证通过');
+  } catch {
+    console.log('[Python] 依赖验证失败，注册功能将不可用');
+  }
+}
 
 app.use(express.json());
 app.use((_req, res, next) => {
@@ -185,5 +222,9 @@ server.listen(PORT, async () => {
   console.log(`[豪猪网] 账号: todayis0607, 项目: 49827`);
   console.log(`[预警通] 地址: https://www.qyyjt.cn/user/login`);
   console.log(`[引擎] Python + Playwright 浏览器自动化`);
+
+  // 启动时确保 Python 依赖已安装
+  ensurePythonDeps();
+
   await checkEnvironment();
 });
