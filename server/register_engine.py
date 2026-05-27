@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-企业预警通(qyyjt.cn) 真实注册引擎 - 修复版
-添加完整日志输出
+企业预警通(qyyjt.cn) 真实注册引擎 - 纯PIL版(无cv2依赖)
 """
 
 import asyncio
 import base64
-import cv2
 import json
 import math
-import numpy as np
 import random
 import requests
 import sys
@@ -43,59 +40,94 @@ REGIONS = [(20, 20, 110, 100), (140, 20, 220, 100), (20, 110, 110, 190), (140, 1
 
 
 def log(msg):
-    """输出日志到stderr（Express能捕获）"""
     print(f"[注册引擎] {msg}", file=sys.stderr)
     sys.stderr.flush()
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  豪猪网登录
+#  纯PIL验证码识别（无需cv2）
 # ═══════════════════════════════════════════════════════════════════
 
-def peak_sat(arr, x1, y1, x2, y2):
-    region = arr[y1:y2, x1:x2]
-    hsv = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
-    sat = hsv[:, :, 1]
-    idx = np.unravel_index(np.argmax(sat), sat.shape)
-    return (x1 + idx[1], y1 + idx[0]), region[idx[0], idx[1]]
+def rgb_to_hsv_pixel(r, g, b):
+    """单像素RGB转HSV，返回(h, s, v)"""
+    r_, g_, b_ = r / 255.0, g / 255.0, b / 255.0
+    mx = max(r_, g_, b_)
+    mn = min(r_, g_, b_)
+    df = mx - mn
+    if mx == mn:
+        h = 0
+    elif mx == r_:
+        h = (60 * ((g_ - b_) / df) + 360) % 360
+    elif mx == g_:
+        h = (60 * ((b_ - r_) / df) + 120) % 360
+    else:
+        h = (60 * ((r_ - g_) / df) + 240) % 360
+    s = 0 if mx == 0 else df / mx
+    return h, s, mx
 
 
-def cdist(a, b):
-    return np.sqrt(np.sum((a.astype(float) - b.astype(float)) ** 2))
+def find_color_peak(img, x1, y1, x2, y2):
+    """在区域中找饱和度最高的点，返回((x,y), color_rgb)"""
+    region = img.crop((x1, y1, x2, y2))
+    pixels = region.load()
+    w, h = region.size
+    best_sat, best_pt, best_color = -1, (0, 0), (0, 0, 0)
+    for y in range(h):
+        for x in range(w):
+            r, g, b = pixels[x, y][:3]
+            _, s, _ = rgb_to_hsv_pixel(r, g, b)
+            if s > best_sat:
+                best_sat = s
+                best_pt = (x1 + x, y1 + y)
+                best_color = (r, g, b)
+    return best_pt, best_color
 
 
-def solve_captcha(img_arr, order_arr):
+def color_dist(c1, c2):
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
+
+
+def solve_captcha_pil(img, order_img):
+    """纯PIL验证码求解"""
+    # 在4个区域中找饱和度峰值（图标中心）
     centers, colors = [], []
     for x1, y1, x2, y2 in REGIONS:
-        pt, c = peak_sat(img_arr, x1, y1, x2, y2)
-        centers.append((int(pt[0]), int(pt[1])))
+        pt, c = find_color_peak(img, x1, y1, x2, y2)
+        centers.append(pt)
         colors.append(c)
 
-    h, w = order_arr.shape[:2]
-    oc = []
+    # 在order图片的4个等分区域中找饱和度峰值（顺序提示）
+    ow, oh = order_img.size
+    order_colors = []
     for i in range(4):
-        xs, xe = int(w * (i / 4 + 0.12)), int(w * ((i + 1) / 4 - 0.12))
-        if xe <= xs: xe = xs + 5
-        region = order_arr[:, xs:xe]
-        rh = cv2.cvtColor(region, cv2.COLOR_RGB2HSV)
-        idx = np.unravel_index(np.argmax(rh[:, :, 1]), rh[:, :, 1].shape)
-        oc.append(region[idx[0], idx[1]])
+        xs = int(ow * (i / 4 + 0.12))
+        xe = int(ow * ((i + 1) / 4 - 0.12))
+        if xe <= xs:
+            xe = xs + 5
+        pt, c = find_color_peak(order_img, xs, 0, xe, oh)
+        order_colors.append(c)
 
+    # 按顺序匹配颜色
     clicks, used = [], set()
-    for o in oc:
+    for oc in order_colors:
         best, bd = None, float("inf")
         for ii, c in enumerate(colors):
-            if ii in used: continue
-            d = cdist(o, c)
-            if d < bd: bd, best = d, ii
+            if ii in used:
+                continue
+            d = color_dist(oc, c)
+            if d < bd:
+                bd, best = d, ii
         if best is not None:
             clicks.append({"x": centers[best][0], "y": centers[best][1]})
             used.add(best)
     return clicks
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  豪猪网登录
+# ═══════════════════════════════════════════════════════════════════
+
 def haozhuma_login():
-    """登录豪猪网"""
     for attempt in range(1, 6):
         s = requests.Session()
         s.headers.update({
@@ -104,7 +136,8 @@ def haozhuma_login():
         })
         try:
             td = s.get(f"{BASE_URL}/time.php", timeout=30).json()
-            if "token" not in td: continue
+            if "token" not in td:
+                continue
 
             cd = s.post(f"{BASE_URL}/Verificationcode.php",
                         json={"token": td["token"], "timestamp": td["timestamp"]},
@@ -112,7 +145,7 @@ def haozhuma_login():
 
             img = Image.open(BytesIO(base64.b64decode(cd["image_data"]))).convert("RGB")
             order_img = Image.open(BytesIO(base64.b64decode(cd["order"]))).convert("RGB")
-            clicks = solve_captcha(np.array(img), np.array(order_img))
+            clicks = solve_captcha_pil(img, order_img)
 
             result = s.post(f"{BASE_URL}/login.php",
                           json={"clicks": clicks, "captcha_id": cd["captcha_id"],
@@ -154,7 +187,8 @@ def read_sms(session, token, phone, max_retries=12):
 def cancel_recv(session, token, phone):
     try:
         session.get(f"https://api.dwtmcp.cn/sms/?api=cancelRecv&token={token}&sid={SID}&phone={phone}", timeout=10)
-    except: pass
+    except:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -188,16 +222,14 @@ async def trigger_sms(page, phone):
 
 
 async def complete_registration(page, phone, sms_code, password=DEFAULT_PASSWORD):
-    # 复用trigger_sms后的同一页面，不重新导航（避免session丢失导致验证码失效）
+    # 复用trigger_sms后的同一页面
     log("预警通: 在当前页面输入验证码")
 
-    # 清除并重新输入手机号（确保正确）
     phone_input = await page.query_selector('input[placeholder*="手机号"]')
     if phone_input:
         await phone_input.fill(phone)
         await asyncio.sleep(0.3)
 
-    # 确保协议已勾选
     checkbox = await page.query_selector('input[type="checkbox"]')
     if checkbox and not await checkbox.is_checked():
         await checkbox.click()
@@ -230,30 +262,24 @@ async def complete_registration(page, phone, sms_code, password=DEFAULT_PASSWORD
         except:
             continue
     if not clicked:
-        # 使用JS点击最后一个按钮
         await page.evaluate('document.querySelectorAll("button")[document.querySelectorAll("button").length-1].click()')
         log("预警通: 使用JS点击最后一个按钮")
     await asyncio.sleep(3)
 
-    # 等待页面响应，给SPA路由和异步弹窗时间
+    # 等待页面响应
     await asyncio.sleep(2)
 
     content = await page.content()
     url = page.url
     log(f"预警通: 当前URL={url}")
 
-    # ═══════════════════════════════════════════════════════
-    # 多重登录成功检测（应对SPA单页应用）
-    # ═══════════════════════════════════════════════════════
-
-    # 1. 检查localStorage中是否有token（最可靠的方式）
+    # 多重登录成功检测
     has_token = await page.evaluate("""() => {
 const tk = localStorage.getItem('a_tk') || localStorage.getItem('token') || localStorage.getItem('accessToken');
 return !!tk;
 }""")
     log(f"预警通: localStorage有token={has_token}")
 
-    # 2. 检查是否存在用户相关元素（退出按钮、用户名、头像等）
     user_elements = await page.evaluate("""() => {
 const indicators = ['[class*="logout"]','[class*="user-name"]','[class*="avatar"]','[class*="user-info"]','.ant-dropdown-trigger','[class*="header-right"]'];
 for (const sel of indicators) { if (document.querySelector(sel)) return sel; }
@@ -261,7 +287,6 @@ return null;
 }""")
     log(f"预警通: 用户元素={user_elements}")
 
-    # 3. 检查是否有错误消息弹窗
     error_msg = await page.evaluate("""() => {
 const el = document.querySelector('.ant-message-error, .ant-notification-notice-message, [class*="error"]');
 return el ? el.textContent : null;
@@ -269,7 +294,6 @@ return el ? el.textContent : null;
     if error_msg:
         log(f"预警通: 检测到错误消息: {error_msg}")
 
-    # 4. 检查是否是设置密码页面/弹窗（可能是异步加载的）
     has_set_pwd = await page.evaluate("""() => {
 return document.body.innerText.includes('设置密码') ||
 document.body.innerText.includes('请设置密码') ||
@@ -278,19 +302,16 @@ document.querySelector('input[placeholder*="设置密码"], input[placeholder*="
 }""")
     log(f"预警通: 需要设置密码={has_set_pwd}")
 
-    # 判断登录状态
     login_success = has_token or user_elements
 
     if has_set_pwd:
         log("预警通: 新用户，需要设置密码")
-        # 尝试多种方式找到密码输入框
         pwd_inputs = await page.query_selector_all('input[type="password"]')
         if len(pwd_inputs) >= 2:
             await pwd_inputs[0].fill(password)
             await asyncio.sleep(0.3)
             await pwd_inputs[1].fill(password)
             await asyncio.sleep(0.3)
-            # 尝试点击确认按钮
             confirm_selectors = [
                 'button:has-text("确认")',
                 'button:has-text("确定")',
@@ -313,7 +334,6 @@ document.querySelector('input[placeholder*="设置密码"], input[placeholder*="
 
     elif login_success:
         log("预警通: 登录成功（通过token或用户元素确认）")
-        # 再检查一下是否需要设置密码（可能是登录后弹窗）
         await asyncio.sleep(1)
         still_need_pwd = await page.evaluate("""() => {
 return document.body.innerText.includes('设置密码') ||
@@ -344,7 +364,6 @@ document.querySelector('input[type="password"]') !== null;
         return f"error: {error_msg}", None
 
     else:
-        # 保存页面内容用于调试
         log(f"预警通: 登录后页面内容前500字: {content[:500]}")
         return "unknown", None
 

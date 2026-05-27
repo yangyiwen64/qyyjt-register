@@ -18,11 +18,12 @@ async function ensurePythonDeps() {
 
   console.log('[Python] 正在检查和安装依赖...');
 
-  // 方式1: 直接 pip3
+  // 需要: PIL(requests内置), requests, playwright
+  const deps = ['pillow', 'requests', 'playwright'];
   const installers = [
-    'pip3 install opencv-python numpy pillow requests scipy playwright',
-    'python3 -m pip install --user opencv-python numpy pillow requests scipy playwright',
-    'python -m pip install opencv-python numpy pillow requests scipy playwright',
+    `pip3 install ${deps.join(' ')}`,
+    `python3 -m pip install --user ${deps.join(' ')}`,
+    `python -m pip install ${deps.join(' ')}`,
   ];
 
   for (const cmd of installers) {
@@ -53,7 +54,7 @@ async function ensurePythonDeps() {
 
   // 验证
   try {
-    execSync('python3 -c "import cv2, numpy, PIL, requests, playwright"', { stdio: 'ignore' });
+    execSync('python3 -c "import PIL, requests, playwright"', { stdio: 'ignore' });
     console.log('[Python] 依赖验证通过');
     pythonDepsReady = true;
     return true;
